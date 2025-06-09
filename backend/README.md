@@ -98,7 +98,7 @@ Adjust max_tokens, temperature, and other OpenAI parameters in the code to tune 
 
 For production, restrict CORS origins instead of allowing all.
 
-Ensure your Azure Search index has a searchable content field.
+##Ensure your Azure Search index has a searchable content field.
 
 Large search results may affect performance; consider using Azure Cognitive Search filters or semantic ranking.
 
