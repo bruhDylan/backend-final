@@ -5,11 +5,12 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
+from azure.search.documents.models import QueryType
 from openai import AzureOpenAI
 import os
 import traceback
 
-# Load environment variables from a .env file (for security and configuration)
+# Load environment variables from a .env file
 load_dotenv()
 
 # Initialize FastAPI app
@@ -27,7 +28,7 @@ app.add_middleware(
 class PromptRequest(BaseModel):
     prompt: str
 
-# Load Azure Search credentials and settings from environment
+# Load Azure Search credentials and settings
 AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
 AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
 AZURE_SEARCH_INDEX_NAME = os.getenv("AZURE_SEARCH_INDEX_NAME")
@@ -50,8 +51,9 @@ openai_client = AzureOpenAI(
 BASE_SYSTEM_PROMPT = {
     "role": "system",
     "content": (
-        "You are a helpful assistant. Use the provided content chunks from the knowledge base to generate the best possible answer. "
-        "If you cannot find an exact answer, summarize or infer based on the most relevant information available."
+        "You are a helpful assistant. Use the provided knowledge chunks to answer the user's question. "
+        "If the chunks are insufficient, respond with your best possible answer based on context and general knowledge. "
+        "Always provide a complete, informative response."
     )
 }
 
@@ -59,24 +61,33 @@ BASE_SYSTEM_PROMPT = {
 async def chat_with_ai(data: PromptRequest):
     prompt = data.prompt.strip()
 
-    # Reject empty prompts
     if not prompt:
         return JSONResponse({"error": "Prompt cannot be empty"}, status_code=400)
 
     try:
-        # Retrieve all documents from Azure Search (up to 9000)
+        # Retrieve all documents from Azure Search using by_page to handle >1000
         all_docs = []
-        results = search_client.search(search_text="*", top=9000)
+        pages = search_client.search(
+            search_text="*",
+            query_type=QueryType.SIMPLE,
+            search_mode="all",
+            top=1000,
+            order_by=["chunk_id asc"]  # sort by a stable field
+        ).by_page()
 
-        for doc in results:
-            all_docs.append(doc)
+        for page in pages:
+            for doc in page:
+                all_docs.append(doc)
 
-        # Limit each document to 1500 characters to avoid overloading the AI
+        print(f"✅ Retrieved {len(all_docs)} documents from index\n")
+
+        # Limit each document to 1500 characters
         content_chunks = []
-        for doc in all_docs:
+        for i, doc in enumerate(all_docs):
             content = doc.get("content", "")
+            title = doc.get("title", f"Document {i+1}")
             if content:
-                chunk = content.strip()[:1500]
+                chunk = f"[{title}]\n{content.strip()[:1500]}"
                 content_chunks.append(chunk)
 
         # Build the message history for the AI
@@ -85,14 +96,9 @@ async def chat_with_ai(data: PromptRequest):
         if content_chunks:
             for i, chunk in enumerate(content_chunks):
                 messages.append({
-                    "role": "system",
-                    "content": f"Document chunk {i+1}:\n{chunk}"
+                    "role": "user",
+                    "content": f"Please consider the following information (chunk {i+1}):\n{chunk}"
                 })
-        else:
-            messages.append({
-                "role": "system",
-                "content": "No documents found in the knowledge base."
-            })
 
         # Add user's prompt to the conversation
         messages.append({"role": "user", "content": prompt})
@@ -106,12 +112,10 @@ async def chat_with_ai(data: PromptRequest):
             top_p=0.9
         )
 
-        # Return the assistant's reply
         reply = completion.choices[0].message.content
         return {"response": reply}
 
     except Exception as e:
-        # Return detailed error message in case of failure
         traceback.print_exc()
         return JSONResponse(
             {"error": "Internal Server Error", "details": str(e)},
@@ -120,5 +124,4 @@ async def chat_with_ai(data: PromptRequest):
 
 @app.get("/")
 async def root():
-    # Health check endpoint
     return {"message": "Backend is running!"}
